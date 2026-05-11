@@ -1,0 +1,87 @@
+{
+  "theme": "dark",
+  "archetype": "Retro-Futurism / Tactical Terminal (Archetype 7)",
+  "colors": {
+    "background": "#030303",
+    "surface": "#0A0A0A",
+    "border": "rgba(255, 176, 0, 0.2)",
+    "border_highlight": "rgba(255, 176, 0, 0.8)",
+    "accent_primary": "#FFB000",
+    "accent_secondary": "#00E5FF",
+    "text_primary": "#F3F4F6",
+    "text_secondary": "rgba(243, 244, 246, 0.6)",
+    "text_accent": "#FFB000",
+    "danger": "#FF3B30",
+    "success": "#34C759"
+  },
+  "typography": {
+    "headings": "Unbounded, sans-serif",
+    "body": "JetBrains Mono, monospace",
+    "terminal": "JetBrains Mono, monospace",
+    "hierarchy": {
+      "h1": "text-2xl tracking-tighter uppercase font-bold text-accent",
+      "h2": "text-lg tracking-widest uppercase font-medium text-text_primary",
+      "body": "text-sm tracking-tight text-text_secondary",
+      "terminal": "text-xs tracking-wider text-accent_primary"
+    }
+  },
+  "layout": {
+    "strategy": "Control Room Grid",
+    "container": "h-screen w-screen overflow-hidden bg-[#030303] text-gray-200 p-4 md:p-6",
+    "grid": "grid grid-cols-12 grid-rows-3 gap-4 h-full",
+    "panels": {
+      "terminal": "col-span-12 md:col-span-4 row-span-2 border border-amber-500/20 bg-black/50 p-4 relative flex flex-col overflow-hidden",
+      "visualizer": "col-span-12 md:col-span-8 row-span-2 border border-amber-500/20 bg-black/50 relative overflow-hidden",
+      "controls": "col-span-12 md:col-span-4 row-span-1 border border-amber-500/20 bg-black/50 p-4 flex flex-col",
+      "balance": "col-span-12 md:col-span-4 row-span-1 border border-amber-500/20 bg-black/50 p-4 flex flex-col",
+      "result": "col-span-12 md:col-span-4 row-span-1 border border-amber-500/20 bg-amber-500/5 p-4 flex flex-col"
+    }
+  },
+  "surface_strategies": {
+    "style": "Retro-Futurism / The Terminal Look",
+    "borders": "1px solid, sharp edges (rounded-none). Add optical corners/brackets using CSS pseudo-elements where necessary to simulate a targeting HUD.",
+    "shadows": "Minimal drop-shadow-[0_0_8px_rgba(255,176,0,0.3)] on key interactive accent elements."
+  },
+  "components": {
+    "SultanInversionTerminal": {
+      "look": "A streaming log feed. Amber text on deep black. Should feel like a hacker console with a blinking cursor at the very end.",
+      "tech": "HTML div with overflow-y-auto, auto-scrolling to bottom. Font: text-xs JetBrains Mono.",
+      "testid": "sultan-terminal"
+    },
+    "BlockchainBalanceChecker": {
+      "look": "Minimalist input field, sharp borders. No rounded corners. Output display in large monospace.",
+      "tech": "Input heavily customized (border-b only or strict rectangle). Fetch via JS fetch API from Blockstream. Use Phosphor icons for status.",
+      "testid": "balance-checker"
+    },
+    "ChronoFieldVisualizer": {
+      "look": "3D wireframe or particle field heavily biased towards Amber (#FFB000) and Ion Cyan (#00E5FF) accents.",
+      "tech": "Three.js via React Three Fiber (@react-three/fiber). Setup a scene with Post-processing bloom. Should react to slider states visually (rotation speed, particle density, waveform amplitude).",
+      "testid": "chrono-visualizer"
+    },
+    "InversionResultPanel": {
+      "look": "The focal point for success output. High contrast. Large font for the collapsed WIF key.",
+      "tech": "Custom flex panel. COPY button should use a Phosphor icon, turning green momentarily on click to signal success.",
+      "testid": "result-panel"
+    },
+    "LogicKernelControls": {
+      "look": "Tactical sliders. Replace default browser sliders with thin lines and sharp rectangular thumbs.",
+      "tech": "Shadcn Slider component, heavily overridden via Tailwind CSS to remove generic 'softness' and enforce sharp, brutalist lines.",
+      "testid": "kernel-controls"
+    }
+  },
+  "motion_and_interactions": {
+    "hover": "Interactive elements highlight border to 100% opacity amber. Text gets text-shadow for a 'glow' effect.",
+    "active": "Slight scale down (0.98) using framer-motion or simple CSS active states.",
+    "terminal": "Fade-in animation for new log lines. Auto-scroll behavior must be smooth."
+  },
+  "media_urls": {},
+  "instructions_to_main_agent": [
+    "Load 'Unbounded' and 'JetBrains Mono' from Google Fonts in index.html.",
+    "The dashboard MUST be exactly 100vh, ensuring NO scrolling on the main page. Use CSS Grid for the layout structure.",
+    "For the Three.js visualizer, use React Three Fiber (`@react-three/fiber` and `@react-three/drei`). Create an abstract rotating mesh or particle system representing the Phi/Gamma field. Bind the 'Logic-Kernel' slider states to the visualizer to modify properties like rotation speed, geometry distortion, or color intensity in real-time.",
+    "Implement a mock data generator (setInterval) for the Sultan-Inversion Terminal that pushes random cryptographic-looking strings or 'Delta-Heuristic' status lines every 300-800ms.",
+    "Ensure all interactive elements have their defined data-testid attributes.",
+    "Use Phosphor icons via `@phosphor-icons/react`.",
+    "Strictly avoid 'AI-slop purple'. The palette must stay strictly within Deep Black, Obsidian Grey, Phosphor Amber, and Ion Cyan."
+  ]
+}
