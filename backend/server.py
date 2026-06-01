@@ -1,72 +1,163 @@
 from fastapi import FastAPI, APIRouter
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import asyncio
+import hashlib
+import secrets
+import random
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
+from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
 app = FastAPI()
-
-# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+# ----------- MODELS -----------
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+class InversionRequest(BaseModel):
+    causality_entropy: float = Field(..., ge=0.0, le=1.0)
+    twist_45: float = Field(..., ge=0.0, le=1.0)
+    pec_gamma: float = Field(..., ge=0.0, le=1.0)
+    target_address: str | None = None
 
-# Add your routes to the router instead of directly to app
+
+class InversionStep(BaseModel):
+    t: str
+    tag: str
+    msg: str
+
+
+class InversionResponse(BaseModel):
+    wif: str
+    fingerprint: str
+    phi: float
+    gamma: float
+    elapsed_ms: int
+    steps: list[InversionStep]
+
+
+# ----------- ROUTES -----------
+
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"service": "omnigenesis", "status": "online"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+def _wif_from_params(p: InversionRequest) -> str:
+    seed = f"{p.causality_entropy:.6f}-{p.twist_45:.6f}-{p.pec_gamma:.6f}-{secrets.token_hex(8)}"
+    h = hashlib.sha256(seed.encode()).hexdigest()
+    # Construct a WIF-style 51-char base58-looking string (synthetic, deterministic in feel)
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    rng = random.Random(h)
+    body = "".join(rng.choice(alphabet) for _ in range(50))
+    return "K" + body  # WIF-compressed keys often start with K or L
 
-# Include the router in the main app
+
+@api_router.post("/inversion/run", response_model=InversionResponse)
+async def run_inversion(req: InversionRequest):
+    start = datetime.now(timezone.utc)
+    wif = _wif_from_params(req)
+    fp = hashlib.sha256(wif.encode()).hexdigest()[:16].upper()
+    phi = 1.6180339887 * (0.8 + 0.4 * req.causality_entropy)
+    gamma = 0.5772156649 * (0.7 + 0.6 * req.pec_gamma) * (1 + req.twist_45 * 0.5)
+
+    target_line = ""
+    if req.target_address:
+        h160 = hashlib.sha256(req.target_address.encode()).hexdigest()[:40].lower()
+        target_line = f" :: target=H160({h160[:12]}…)"
+
+    steps_data = [
+        ("SCC", f"Initialising Sultan-Inversion :: entropy={req.causality_entropy:.4f}{target_line}"),
+        ("BCH", "Baker-Campbell-Hausdorff expansion order=4 | [X_L,X_R]=iT_vac·ℏ"),
+        ("TWS", f"45° phase twist applied :: e^(-iσ_z/2) | θ={req.twist_45 * 90:.3f}°"),
+        ("DLT", f"Delta-Heuristic seed lock :: twist45={req.twist_45:.4f}"),
+        ("PHI", f"Phi resonance bound @ {phi:.6f}"),
+        ("GAM", f"Gamma collapse @ {gamma:.6f} | PEC={req.pec_gamma:.4f}"),
+        ("TIC", "Tachyonic information-backflow established"),
+        ("AFR", "Algebraic-Flow-Reverser :: H160⁻¹ heuristic converging"),
+        ("TQES", "Topological quantum-entanglement state armed"),
+        ("ECDLP", "secp256k1 :: d·G → P inverse vector resolving"),
+        ("SCC", "Mapping causality vectors to elliptic frame"),
+        ("DLT", "Inversion lattice converged in 7 cycles"),
+        ("WIF", f"Collapsed WIF fingerprint :: {fp}"),
+        ("OK", "Kernel stable. Output ready. [SIMULATION]"),
+    ]
+    steps = [InversionStep(t=datetime.now(timezone.utc).isoformat(), tag=tag, msg=msg) for tag, msg in steps_data]
+    elapsed = int((datetime.now(timezone.utc) - start).total_seconds() * 1000) + 137
+    return InversionResponse(wif=wif, fingerprint=fp, phi=phi, gamma=gamma, elapsed_ms=elapsed, steps=steps)
+
+
+# ---- SSE Terminal Stream ----
+
+_LOG_TAGS = ["SCC", "DLT", "PHI", "GAM", "PEC", "TWS", "KRN", "OBS", "BCH", "TIC", "AFR", "TQES", "ECDLP"]
+_LOG_FRAGMENTS = [
+    "scanning elliptic curve secp256k1 :: chunk {n}",
+    "delta-heuristic step Δ={d:.5f} convergence={c:.4f}",
+    "phi-field oscillation amplitude {a:.5f} @ node {n}",
+    "gamma collapse vector [{a:.3f}, {b:.3f}, {c:.3f}]",
+    "PEC-gamma boundary breach prevented at sector {n}",
+    "45°-twist tensor stabilised | residue {d:.6f}",
+    "kernel heartbeat OK | uptime {n}ms",
+    "observer entanglement {c:.3f} | drift {d:.5f}",
+    "SCC eigen-decomp k={n} λ={a:.4f}",
+    "lattice fold complete :: hash {h}",
+    "inversion bus :: 0x{h} accepted",
+    "phi/gamma ratio nominal @ {a:.5f}",
+    "BCH expansion [X_L,X_R]={a:.4f} | order {n}",
+    "tachyonic info-backflow Δt=-{d:.5f}s | TIC node {n}",
+    "AFR :: H160⁻¹ candidate 0x{h} rejected",
+    "TQES topological winding w={c:.4f} | genus 1",
+    "ECDLP d·G search :: window {n} of 2^{a:.0f}",
+    "secp256k1 :: y²=x³+7 (mod p) | p-residue {d:.5f}",
+]
+
+
+async def _log_stream():
+    yield "event: hello\ndata: omnigenesis-terminal-online\n\n"
+    counter = 0
+    while True:
+        counter += 1
+        tag = random.choice(_LOG_TAGS)
+        frag = random.choice(_LOG_FRAGMENTS).format(
+            n=random.randint(100, 99999),
+            d=random.random(),
+            c=random.random(),
+            a=random.uniform(0, 3),
+            b=random.uniform(0, 3),
+            h=secrets.token_hex(6),
+        )
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+        payload = f"[{ts}] [{tag}] {frag}"
+        yield f"data: {payload}\n\n"
+        await asyncio.sleep(random.uniform(0.25, 0.7))
+
+
+@api_router.get("/inversion/stream")
+async def stream_logs():
+    return StreamingResponse(
+        _log_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -77,12 +168,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
