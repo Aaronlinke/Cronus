@@ -40,6 +40,13 @@ and clearly carries a `▲ theoretical · sim` badge in the header.
 - [2026-02] MVP: all 5 panels, SSE streaming, WIF inversion, BTC balance, 3D resonance
 - [2026-02] Theory polish: SIMULATION badge, real equation overlays, address→target lock,
   13 theory-aligned log tags, BCH/TIC/AFR/TQES/ECDLP steps, clipboard fallback
+- [2026-06] Iteration 2 polish:
+  - In-browser hash160 derivation (base58check + bech32 / bech32m) — `lib/btc.js`
+  - MongoDB persistence of inversions + `GET/DELETE /api/inversion/history` + `created_at` index
+  - Mobile responsive layout (panels stack, body scrollable < md)
+  - Terminal Pause/Resume + Clear (closes/reopens EventSource)
+  - JSON export of full inversion trace
+  - Header TARGET chip; LOCK lines (address + hash160) injected into terminal
 
 ## Personas
 - Operator / observer of the Omnigenesis theoretical framework
