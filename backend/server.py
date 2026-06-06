@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Query
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -9,8 +9,9 @@ import hashlib
 import secrets
 import random
 import logging
+import uuid
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime, timezone
 
 
@@ -32,6 +33,7 @@ class InversionRequest(BaseModel):
     twist_45: float = Field(..., ge=0.0, le=1.0)
     pec_gamma: float = Field(..., ge=0.0, le=1.0)
     target_address: str | None = None
+    target_hash160: str | None = None
 
 
 class InversionStep(BaseModel):
@@ -41,12 +43,32 @@ class InversionStep(BaseModel):
 
 
 class InversionResponse(BaseModel):
+    id: str
     wif: str
     fingerprint: str
     phi: float
     gamma: float
     elapsed_ms: int
     steps: list[InversionStep]
+    target_address: str | None = None
+    target_hash160: str | None = None
+    created_at: str
+
+
+class InversionHistoryItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    wif: str
+    fingerprint: str
+    phi: float
+    gamma: float
+    elapsed_ms: int
+    target_address: str | None = None
+    target_hash160: str | None = None
+    created_at: str
+    causality_entropy: float
+    twist_45: float
+    pec_gamma: float
 
 
 # ----------- ROUTES -----------
@@ -57,13 +79,18 @@ async def root():
 
 
 def _wif_from_params(p: InversionRequest) -> str:
-    seed = f"{p.causality_entropy:.6f}-{p.twist_45:.6f}-{p.pec_gamma:.6f}-{secrets.token_hex(8)}"
-    h = hashlib.sha256(seed.encode()).hexdigest()
-    # Construct a WIF-style 51-char base58-looking string (synthetic, deterministic in feel)
+    seed_parts = [
+        f"{p.causality_entropy:.6f}",
+        f"{p.twist_45:.6f}",
+        f"{p.pec_gamma:.6f}",
+        p.target_hash160 or p.target_address or "",
+        secrets.token_hex(8),
+    ]
+    h = hashlib.sha256("-".join(seed_parts).encode()).hexdigest()
     alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     rng = random.Random(h)
     body = "".join(rng.choice(alphabet) for _ in range(50))
-    return "K" + body  # WIF-compressed keys often start with K or L
+    return "K" + body
 
 
 @api_router.post("/inversion/run", response_model=InversionResponse)
@@ -75,9 +102,10 @@ async def run_inversion(req: InversionRequest):
     gamma = 0.5772156649 * (0.7 + 0.6 * req.pec_gamma) * (1 + req.twist_45 * 0.5)
 
     target_line = ""
-    if req.target_address:
-        h160 = hashlib.sha256(req.target_address.encode()).hexdigest()[:40].lower()
-        target_line = f" :: target=H160({h160[:12]}…)"
+    if req.target_hash160:
+        target_line = f" :: target=H160({req.target_hash160[:12]}…)"
+    elif req.target_address:
+        target_line = f" :: target={req.target_address[:10]}…"
 
     steps_data = [
         ("SCC", f"Initialising Sultan-Inversion :: entropy={req.causality_entropy:.4f}{target_line}"),
@@ -95,9 +123,57 @@ async def run_inversion(req: InversionRequest):
         ("WIF", f"Collapsed WIF fingerprint :: {fp}"),
         ("OK", "Kernel stable. Output ready. [SIMULATION]"),
     ]
-    steps = [InversionStep(t=datetime.now(timezone.utc).isoformat(), tag=tag, msg=msg) for tag, msg in steps_data]
-    elapsed = int((datetime.now(timezone.utc) - start).total_seconds() * 1000) + 137
-    return InversionResponse(wif=wif, fingerprint=fp, phi=phi, gamma=gamma, elapsed_ms=elapsed, steps=steps)
+    now = datetime.now(timezone.utc)
+    steps = [InversionStep(t=now.isoformat(), tag=tag, msg=msg) for tag, msg in steps_data]
+    elapsed = int((now - start).total_seconds() * 1000) + 137
+
+    inv_id = str(uuid.uuid4())
+    response = InversionResponse(
+        id=inv_id,
+        wif=wif,
+        fingerprint=fp,
+        phi=phi,
+        gamma=gamma,
+        elapsed_ms=elapsed,
+        steps=steps,
+        target_address=req.target_address,
+        target_hash160=req.target_hash160,
+        created_at=now.isoformat(),
+    )
+
+    # Persist to MongoDB (history record)
+    record = {
+        "id": inv_id,
+        "wif": wif,
+        "fingerprint": fp,
+        "phi": phi,
+        "gamma": gamma,
+        "elapsed_ms": elapsed,
+        "target_address": req.target_address,
+        "target_hash160": req.target_hash160,
+        "causality_entropy": req.causality_entropy,
+        "twist_45": req.twist_45,
+        "pec_gamma": req.pec_gamma,
+        "created_at": now.isoformat(),
+    }
+    try:
+        await db.inversions.insert_one(record)
+    except Exception as e:
+        logger.warning("inversion persist failed: %s", e)
+
+    return response
+
+
+@api_router.get("/inversion/history", response_model=list[InversionHistoryItem])
+async def list_inversions(limit: int = Query(default=20, ge=1, le=100)):
+    cursor = db.inversions.find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
+    return await cursor.to_list(length=limit)
+
+
+@api_router.delete("/inversion/history")
+async def clear_inversions():
+    res = await db.inversions.delete_many({})
+    return {"deleted": res.deleted_count}
 
 
 # ---- SSE Terminal Stream ----
@@ -127,22 +203,23 @@ _LOG_FRAGMENTS = [
 
 async def _log_stream():
     yield "event: hello\ndata: omnigenesis-terminal-online\n\n"
-    counter = 0
-    while True:
-        counter += 1
-        tag = random.choice(_LOG_TAGS)
-        frag = random.choice(_LOG_FRAGMENTS).format(
-            n=random.randint(100, 99999),
-            d=random.random(),
-            c=random.random(),
-            a=random.uniform(0, 3),
-            b=random.uniform(0, 3),
-            h=secrets.token_hex(6),
-        )
-        ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
-        payload = f"[{ts}] [{tag}] {frag}"
-        yield f"data: {payload}\n\n"
-        await asyncio.sleep(random.uniform(0.25, 0.7))
+    try:
+        while True:
+            tag = random.choice(_LOG_TAGS)
+            frag = random.choice(_LOG_FRAGMENTS).format(
+                n=random.randint(100, 99999),
+                d=random.random(),
+                c=random.random(),
+                a=random.uniform(0, 3),
+                b=random.uniform(0, 3),
+                h=secrets.token_hex(6),
+            )
+            ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+            payload = f"[{ts}] [{tag}] {frag}"
+            yield f"data: {payload}\n\n"
+            await asyncio.sleep(random.uniform(0.25, 0.7))
+    except asyncio.CancelledError:
+        return
 
 
 @api_router.get("/inversion/stream")

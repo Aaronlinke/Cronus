@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { CurrencyBtc, MagnifyingGlass, Warning } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import { decodeAddress } from "@/lib/btc";
 
 const SATS = 1e8;
 
@@ -28,14 +29,16 @@ export default function BalanceChecker({ setTarget }) {
       const m_funded = data.mempool_stats.funded_txo_sum;
       const m_spent = data.mempool_stats.spent_txo_sum;
       const balanceSats = funded - spent + m_funded - m_spent;
+      const decoded = decodeAddress(data.address);
       setResult({
         address: data.address,
         balance: balanceSats / SATS,
         tx_count: data.chain_stats.tx_count,
         funded: funded / SATS,
         spent: spent / SATS,
+        hash160: decoded?.hash160 || null,
+        addr_type: decoded?.type || "unknown",
       });
-      if (setTarget) setTarget({ address: data.address, hash160: null });
     } catch (e) {
       setError(e.message || "lookup failed");
       toast.error("blockstream lookup failed");
@@ -46,7 +49,8 @@ export default function BalanceChecker({ setTarget }) {
 
   const lockTarget = () => {
     if (!result) return;
-    if (setTarget) setTarget({ address: result.address, hash160: null });
+    if (setTarget)
+      setTarget({ address: result.address, hash160: result.hash160 });
     toast.success("target locked → inversion kernel");
   };
 
@@ -126,6 +130,19 @@ export default function BalanceChecker({ setTarget }) {
               <span className="truncate col-span-2 text-amber-500/50">
                 {result.address}
               </span>
+              {result.hash160 && (
+                <>
+                  <span className="text-amber-400/50 text-[9px] tracking-[0.2em] uppercase mt-1">
+                    {result.addr_type}
+                  </span>
+                  <span
+                    data-testid="balance-hash160"
+                    className="truncate col-span-2 text-cyan-300/80 text-[10px]"
+                  >
+                    h160: {result.hash160}
+                  </span>
+                </>
+              )}
             </div>
             <button
               data-testid="lock-target-btn"

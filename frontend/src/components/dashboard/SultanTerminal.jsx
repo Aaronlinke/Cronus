@@ -1,18 +1,19 @@
-import { useEffect, useRef, useState } from "react";
-import { Terminal } from "@phosphor-icons/react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Terminal, Pause, Play, Trash } from "@phosphor-icons/react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 export default function SultanTerminal({ target }) {
   const [lines, setLines] = useState([]);
   const [connected, setConnected] = useState(false);
+  const [paused, setPaused] = useState(false);
   const scrollRef = useRef(null);
   const esRef = useRef(null);
 
-  useEffect(() => {
+  const connect = useCallback(() => {
+    if (esRef.current) return;
     const es = new EventSource(`${API}/inversion/stream`);
     esRef.current = es;
-
     es.onopen = () => setConnected(true);
     es.onerror = () => setConnected(false);
     es.onmessage = (e) => {
@@ -22,25 +23,49 @@ export default function SultanTerminal({ target }) {
         return next;
       });
     };
-
-    return () => {
-      es.close();
-    };
   }, []);
+
+  const disconnect = useCallback(() => {
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
+    setConnected(false);
+  }, []);
+
+  useEffect(() => {
+    connect();
+    return () => disconnect();
+  }, [connect, disconnect]);
 
   useEffect(() => {
     if (target?.address) {
       const ts = new Date().toISOString().substr(11, 12);
-      const msg = `[${ts}] [LOCK] >> TARGET LOCKED :: ${target.address}`;
-      setLines((prev) => [...prev, msg]);
+      const newLines = [`[${ts}] [LOCK] >> TARGET LOCKED :: ${target.address}`];
+      if (target.hash160) {
+        newLines.push(`[${ts}] [LOCK] >> hash160 :: ${target.hash160}`);
+      }
+      setLines((prev) => [...prev, ...newLines]);
     }
-  }, [target?.address]);
+  }, [target?.address, target?.hash160]);
 
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && !paused) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [lines]);
+  }, [lines, paused]);
+
+  const togglePause = () => {
+    if (paused) {
+      connect();
+      setPaused(false);
+    } else {
+      disconnect();
+      setPaused(true);
+    }
+  };
+
+  const clearTerminal = () => setLines([]);
 
   const tagColor = (line) => {
     if (line.includes("[LOCK]")) return "text-cyan-300 font-bold";
@@ -60,28 +85,59 @@ export default function SultanTerminal({ target }) {
     return "text-amber-400/80";
   };
 
+  const statusLabel = paused
+    ? "paused"
+    : connected
+      ? "live · streaming"
+      : "linking…";
+
   return (
     <div
       data-testid="sultan-terminal"
       className="omni-panel p-3 flex flex-col w-full min-h-0"
     >
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between mb-2 gap-2">
         <div className="omni-panel-title">
           <Terminal size={12} weight="bold" />
           Sultan-Inversion Terminal
         </div>
         <div className="flex items-center gap-2 text-[9px] tracking-[0.25em] uppercase">
+          <button
+            data-testid="terminal-pause-btn"
+            onClick={togglePause}
+            title={paused ? "resume stream" : "pause stream"}
+            className="border border-amber-500/30 px-1.5 py-1 hover:bg-amber-400/10 text-amber-300 flex items-center gap-1"
+          >
+            {paused ? <Play size={10} weight="bold" /> : <Pause size={10} weight="bold" />}
+            <span className="hidden sm:inline">{paused ? "resume" : "pause"}</span>
+          </button>
+          <button
+            data-testid="terminal-clear-btn"
+            onClick={clearTerminal}
+            title="clear terminal"
+            className="border border-amber-500/30 px-1.5 py-1 hover:bg-amber-400/10 text-amber-300/80 flex items-center gap-1"
+          >
+            <Trash size={10} weight="bold" />
+            <span className="hidden sm:inline">clear</span>
+          </button>
           <span
-            className={`omni-status-dot ${connected ? "" : "cyan"} ${
-              connected ? "omni-pulse" : ""
+            className={`omni-status-dot ${paused ? "" : connected ? "" : "cyan"} ${
+              !paused && connected ? "omni-pulse" : ""
             }`}
+            style={paused ? { background: "#FF3B30", boxShadow: "0 0 8px #FF3B30" } : {}}
             data-testid="terminal-status-dot"
           />
           <span
-            className={connected ? "text-amber-400" : "text-cyan-300"}
+            className={
+              paused
+                ? "text-red-400"
+                : connected
+                  ? "text-amber-400"
+                  : "text-cyan-300"
+            }
             data-testid="terminal-status-label"
           >
-            {connected ? "live · streaming" : "linking…"}
+            {statusLabel}
           </span>
         </div>
       </div>
@@ -104,7 +160,7 @@ export default function SultanTerminal({ target }) {
             {l}
           </div>
         ))}
-        <div className="omni-cursor h-3" />
+        {!paused && <div className="omni-cursor h-3" />}
       </div>
     </div>
   );

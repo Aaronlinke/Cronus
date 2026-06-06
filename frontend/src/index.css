@@ -29,7 +29,12 @@ body {
     font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    overflow: hidden;
+}
+
+@media (min-width: 768px) {
+    body {
+        overflow: hidden;
+    }
 }
 
 ::selection {
