@@ -1,54 +1,109 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal, Pause, Play, Trash } from "@phosphor-icons/react";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+// Convert https://host → wss://host, http://host → ws://host
+function wsUrl(httpUrl, path) {
+  const u = new URL(path, httpUrl);
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  return u.toString();
+}
+
+const BACKEND = process.env.REACT_APP_BACKEND_URL;
+const WS_ENDPOINT = wsUrl(BACKEND, "/api/ws/terminal");
 
 export default function SultanTerminal({ target }) {
   const [lines, setLines] = useState([]);
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
   const scrollRef = useRef(null);
-  const esRef = useRef(null);
+  const wsRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
 
-  const connect = useCallback(() => {
-    if (esRef.current) return;
-    const es = new EventSource(`${API}/inversion/stream`);
-    esRef.current = es;
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
-    es.onmessage = (e) => {
-      setLines((prev) => {
-        const next = [...prev, e.data];
-        if (next.length > 400) next.splice(0, next.length - 400);
-        return next;
-      });
-    };
+  const appendLine = useCallback((line) => {
+    setLines((prev) => {
+      const next = [...prev, line];
+      if (next.length > 400) next.splice(0, next.length - 400);
+      return next;
+    });
   }, []);
 
-  const disconnect = useCallback(() => {
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
+  const connect = useCallback(() => {
+    if (wsRef.current) return;
+    let ws;
+    try {
+      ws = new WebSocket(WS_ENDPOINT);
+    } catch {
+      setConnected(false);
+      return;
     }
+    wsRef.current = ws;
+    ws.onopen = () => {
+      setConnected(true);
+      // (Re-)send current target on connect
+      if (target?.address) {
+        ws.send(
+          JSON.stringify({
+            type: "set_target",
+            address: target.address,
+            hash160: target.hash160 || null,
+          }),
+        );
+      }
+    };
+    ws.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.line) appendLine(data.line);
+      } catch {
+        // ignore
+      }
+    };
+    ws.onclose = () => {
+      setConnected(false);
+      // If wsRef still points at this socket, the close was unexpected → reconnect
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+        reconnectTimerRef.current = setTimeout(connect, 1500);
+      }
+    };
+    ws.onerror = () => {
+      setConnected(false);
+    };
+  }, [appendLine, target?.address, target?.hash160]);
+
+  const disconnect = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    const ws = wsRef.current;
+    wsRef.current = null; // mark first so onclose skips reconnect
+    if (ws) ws.close();
     setConnected(false);
   }, []);
 
+  // Initial connect + cleanup
   useEffect(() => {
     connect();
     return () => disconnect();
   }, [connect, disconnect]);
 
+  // Send target updates to backend whenever target changes (debounced naturally)
   useEffect(() => {
-    if (target?.address) {
-      const ts = new Date().toISOString().substr(11, 12);
-      const newLines = [`[${ts}] [LOCK] >> TARGET LOCKED :: ${target.address}`];
-      if (target.hash160) {
-        newLines.push(`[${ts}] [LOCK] >> hash160 :: ${target.hash160}`);
-      }
-      setLines((prev) => [...prev, ...newLines]);
+    if (!target?.address) return;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: "set_target",
+          address: target.address,
+          hash160: target.hash160 || null,
+        }),
+      );
     }
   }, [target?.address, target?.hash160]);
 
+  // Auto-scroll
   useEffect(() => {
     if (scrollRef.current && !paused) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -56,11 +111,18 @@ export default function SultanTerminal({ target }) {
   }, [lines, paused]);
 
   const togglePause = () => {
+    const ws = wsRef.current;
     if (paused) {
-      connect();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "resume" }));
+      } else {
+        connect();
+      }
       setPaused(false);
     } else {
-      disconnect();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "pause" }));
+      }
       setPaused(true);
     }
   };
@@ -88,7 +150,7 @@ export default function SultanTerminal({ target }) {
   const statusLabel = paused
     ? "paused"
     : connected
-      ? "live · streaming"
+      ? "live · ws"
       : "linking…";
 
   return (
@@ -121,10 +183,14 @@ export default function SultanTerminal({ target }) {
             <span className="hidden sm:inline">clear</span>
           </button>
           <span
-            className={`omni-status-dot ${paused ? "" : connected ? "" : "cyan"} ${
-              !paused && connected ? "omni-pulse" : ""
-            }`}
-            style={paused ? { background: "#FF3B30", boxShadow: "0 0 8px #FF3B30" } : {}}
+            className={`omni-status-dot ${!paused && connected ? "omni-pulse" : ""}`}
+            style={
+              paused
+                ? { background: "#FF3B30", boxShadow: "0 0 8px #FF3B30" }
+                : !connected
+                  ? { background: "#00E5FF", boxShadow: "0 0 8px #00E5FF" }
+                  : {}
+            }
             data-testid="terminal-status-dot"
           />
           <span

@@ -1,8 +1,11 @@
-from fastapi import FastAPI, APIRouter, Query
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, APIRouter, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse, JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import os
 import asyncio
 import hashlib
@@ -10,6 +13,7 @@ import secrets
 import random
 import logging
 import uuid
+import json
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime, timezone
@@ -25,7 +29,13 @@ db = client[os.environ['DB_NAME']]
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Rate limiter — 30 inversion ops per minute per IP, generous on read endpoints
+limiter = Limiter(key_func=get_remote_address, default_limits=[])
+
 app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 api_router = APIRouter(prefix="/api")
 
 
@@ -74,11 +84,53 @@ class InversionHistoryItem(BaseModel):
     pec_gamma: float
 
 
+# ----------- LOG FRAGMENT POOL -----------
+
+_LOG_TAGS = ["SCC", "DLT", "PHI", "GAM", "PEC", "TWS", "KRN", "OBS", "BCH", "TIC", "AFR", "TQES", "ECDLP"]
+_LOG_FRAGMENTS = [
+    "scanning elliptic curve secp256k1 :: chunk {n}",
+    "delta-heuristic step Δ={d:.5f} convergence={c:.4f}",
+    "phi-field oscillation amplitude {a:.5f} @ node {n}",
+    "gamma collapse vector [{a:.3f}, {b:.3f}, {c:.3f}]",
+    "PEC-gamma boundary breach prevented at sector {n}",
+    "45°-twist tensor stabilised | residue {d:.6f}",
+    "kernel heartbeat OK | uptime {n}ms",
+    "observer entanglement {c:.3f} | drift {d:.5f}",
+    "SCC eigen-decomp k={n} λ={a:.4f}",
+    "lattice fold complete :: hash {h}",
+    "inversion bus :: 0x{h} accepted",
+    "phi/gamma ratio nominal @ {a:.5f}",
+    "BCH expansion [X_L,X_R]={a:.4f} | order {n}",
+    "tachyonic info-backflow Δt=-{d:.5f}s | TIC node {n}",
+    "AFR :: H160⁻¹ candidate 0x{h} rejected",
+    "TQES topological winding w={c:.4f} | genus 1",
+    "ECDLP d·G search :: window {n} of 2^{a:.0f}",
+    "secp256k1 :: y²=x³+7 (mod p) | p-residue {d:.5f}",
+]
+
+
+def _gen_log_line(target_hash160: str | None = None) -> str:
+    tag = random.choice(_LOG_TAGS)
+    # Bias certain tags when a target is locked
+    if target_hash160 and random.random() < 0.25:
+        tag = random.choice(["AFR", "ECDLP", "TQES", "TIC"])
+    frag = random.choice(_LOG_FRAGMENTS).format(
+        n=random.randint(100, 99999),
+        d=random.random(),
+        c=random.random(),
+        a=random.uniform(0, 3),
+        b=random.uniform(0, 3),
+        h=(target_hash160[:12] if target_hash160 and random.random() < 0.2 else secrets.token_hex(6)),
+    )
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    return f"[{ts}] [{tag}] {frag}"
+
+
 # ----------- ROUTES -----------
 
 @api_router.get("/")
 async def root():
-    return {"service": "omnigenesis", "status": "online"}
+    return {"service": "omnigenesis", "status": "online", "transport": ["sse", "ws"]}
 
 
 def _wif_from_params(p: InversionRequest) -> str:
@@ -97,7 +149,8 @@ def _wif_from_params(p: InversionRequest) -> str:
 
 
 @api_router.post("/inversion/run", response_model=InversionResponse)
-async def run_inversion(req: InversionRequest):
+@limiter.limit("30/minute")
+async def run_inversion(request: Request, req: InversionRequest):
     start = datetime.now(timezone.utc)
     wif = _wif_from_params(req)
     fp = hashlib.sha256(wif.encode()).hexdigest()[:16].upper()
@@ -144,7 +197,6 @@ async def run_inversion(req: InversionRequest):
         created_at=now.isoformat(),
     )
 
-    # Persist to MongoDB (history record)
     record = {
         "id": inv_id,
         "wif": wif,
@@ -168,58 +220,26 @@ async def run_inversion(req: InversionRequest):
 
 
 @api_router.get("/inversion/history", response_model=list[InversionHistoryItem])
-async def list_inversions(limit: int = Query(default=20, ge=1, le=100)):
+@limiter.limit("60/minute")
+async def list_inversions(request: Request, limit: int = Query(default=20, ge=1, le=100)):
     cursor = db.inversions.find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
     return await cursor.to_list(length=limit)
 
 
 @api_router.delete("/inversion/history")
-async def clear_inversions():
+@limiter.limit("10/minute")
+async def clear_inversions(request: Request):
     res = await db.inversions.delete_many({})
     return {"deleted": res.deleted_count}
 
 
-# ---- SSE Terminal Stream ----
+# ---- SSE Terminal Stream (legacy / fallback) ----
 
-_LOG_TAGS = ["SCC", "DLT", "PHI", "GAM", "PEC", "TWS", "KRN", "OBS", "BCH", "TIC", "AFR", "TQES", "ECDLP"]
-_LOG_FRAGMENTS = [
-    "scanning elliptic curve secp256k1 :: chunk {n}",
-    "delta-heuristic step Δ={d:.5f} convergence={c:.4f}",
-    "phi-field oscillation amplitude {a:.5f} @ node {n}",
-    "gamma collapse vector [{a:.3f}, {b:.3f}, {c:.3f}]",
-    "PEC-gamma boundary breach prevented at sector {n}",
-    "45°-twist tensor stabilised | residue {d:.6f}",
-    "kernel heartbeat OK | uptime {n}ms",
-    "observer entanglement {c:.3f} | drift {d:.5f}",
-    "SCC eigen-decomp k={n} λ={a:.4f}",
-    "lattice fold complete :: hash {h}",
-    "inversion bus :: 0x{h} accepted",
-    "phi/gamma ratio nominal @ {a:.5f}",
-    "BCH expansion [X_L,X_R]={a:.4f} | order {n}",
-    "tachyonic info-backflow Δt=-{d:.5f}s | TIC node {n}",
-    "AFR :: H160⁻¹ candidate 0x{h} rejected",
-    "TQES topological winding w={c:.4f} | genus 1",
-    "ECDLP d·G search :: window {n} of 2^{a:.0f}",
-    "secp256k1 :: y²=x³+7 (mod p) | p-residue {d:.5f}",
-]
-
-
-async def _log_stream():
+async def _sse_stream():
     yield "event: hello\ndata: omnigenesis-terminal-online\n\n"
     try:
         while True:
-            tag = random.choice(_LOG_TAGS)
-            frag = random.choice(_LOG_FRAGMENTS).format(
-                n=random.randint(100, 99999),
-                d=random.random(),
-                c=random.random(),
-                a=random.uniform(0, 3),
-                b=random.uniform(0, 3),
-                h=secrets.token_hex(6),
-            )
-            ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
-            payload = f"[{ts}] [{tag}] {frag}"
-            yield f"data: {payload}\n\n"
+            yield f"data: {_gen_log_line()}\n\n"
             await asyncio.sleep(random.uniform(0.25, 0.7))
     except asyncio.CancelledError:
         return
@@ -228,7 +248,7 @@ async def _log_stream():
 @api_router.get("/inversion/stream")
 async def stream_logs():
     return StreamingResponse(
-        _log_stream(),
+        _sse_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -237,6 +257,76 @@ async def stream_logs():
         },
     )
 
+
+# ---- WebSocket Terminal — bidirectional, per-client target ----
+
+@api_router.websocket("/ws/terminal")
+async def ws_terminal(ws: WebSocket):
+    await ws.accept()
+    state = {"target_address": None, "target_hash160": None, "paused": False}
+
+    async def reader():
+        try:
+            while True:
+                raw = await ws.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    continue
+                t = msg.get("type")
+                if t == "set_target":
+                    state["target_address"] = msg.get("address")
+                    state["target_hash160"] = msg.get("hash160")
+                    ts = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+                    await ws.send_text(json.dumps({
+                        "kind": "lock",
+                        "line": f"[{ts}] [LOCK] >> TARGET LOCKED :: {state['target_address']}",
+                    }))
+                    if state["target_hash160"]:
+                        await ws.send_text(json.dumps({
+                            "kind": "lock",
+                            "line": f"[{ts}] [LOCK] >> hash160 :: {state['target_hash160']}",
+                        }))
+                elif t == "clear_target":
+                    state["target_address"] = None
+                    state["target_hash160"] = None
+                elif t == "pause":
+                    state["paused"] = True
+                elif t == "resume":
+                    state["paused"] = False
+                elif t == "ping":
+                    await ws.send_text(json.dumps({"kind": "pong"}))
+        except WebSocketDisconnect:
+            return
+        except Exception as e:
+            logger.warning("ws reader err: %s", e)
+
+    async def writer():
+        try:
+            await ws.send_text(json.dumps({"kind": "hello", "line": "omnigenesis-ws-online"}))
+            while True:
+                if not state["paused"]:
+                    line = _gen_log_line(state["target_hash160"])
+                    await ws.send_text(json.dumps({"kind": "log", "line": line}))
+                await asyncio.sleep(random.uniform(0.25, 0.7))
+        except WebSocketDisconnect:
+            return
+        except Exception as e:
+            logger.warning("ws writer err: %s", e)
+
+    reader_task = asyncio.create_task(reader())
+    writer_task = asyncio.create_task(writer())
+    try:
+        done, pending = await asyncio.wait(
+            [reader_task, writer_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+    except Exception as e:
+        logger.warning("ws gather err: %s", e)
+
+
+# ---- Mount router ----
 
 app.include_router(api_router)
 

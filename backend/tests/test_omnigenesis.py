@@ -1,11 +1,15 @@
-"""Omnigenesis backend API tests"""
+"""Omnigenesis backend API tests (iter3: WS + rate-limit)"""
 import os
 import time
+import json
+import asyncio
 import requests
 import pytest
+import websockets
 
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://chrono-visualizer.preview.emergentagent.com').rstrip('/')
 API = f"{BASE_URL}/api"
+WS_URL = BASE_URL.replace("https://", "wss://").replace("http://", "ws://") + "/api/ws/terminal"
 
 
 class TestInversionPersistence:
@@ -92,6 +96,118 @@ class TestRoot:
         data = r.json()
         assert data.get("service") == "omnigenesis"
         assert data.get("status") == "online"
+        assert "transport" in data
+        assert "ws" in data["transport"] and "sse" in data["transport"]
+
+
+# ----- WebSocket Terminal -----
+class TestWebSocketTerminal:
+    @pytest.mark.asyncio
+    async def test_hello_on_connect(self):
+        async with websockets.connect(WS_URL, open_timeout=10) as ws:
+            msg = await asyncio.wait_for(ws.recv(), timeout=5)
+            d = json.loads(msg)
+            assert d.get("kind") == "hello"
+
+    @pytest.mark.asyncio
+    async def test_set_target_emits_two_lock_messages(self):
+        async with websockets.connect(WS_URL, open_timeout=10) as ws:
+            # consume hello
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            await ws.send(json.dumps({
+                "type": "set_target",
+                "address": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+                "hash160": "62e907b15cbf27d5425399ebf6f0fb50ebb88f18",
+            }))
+            locks = []
+            deadline = time.time() + 5
+            while time.time() < deadline and len(locks) < 2:
+                raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                d = json.loads(raw)
+                if d.get("kind") == "lock":
+                    locks.append(d.get("line", ""))
+            assert len(locks) >= 2
+            joined = " ".join(locks)
+            assert "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa" in joined
+            assert "62e907b15cbf27d5425399ebf6f0fb50ebb88f18" in joined
+
+    @pytest.mark.asyncio
+    async def test_pause_stops_and_resume_restarts(self):
+        async with websockets.connect(WS_URL, open_timeout=10) as ws:
+            # consume hello + collect some logs
+            await asyncio.wait_for(ws.recv(), timeout=5)
+            got_log = False
+            deadline = time.time() + 4
+            while time.time() < deadline and not got_log:
+                raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                if json.loads(raw).get("kind") == "log":
+                    got_log = True
+            assert got_log, "no logs before pause"
+
+            await ws.send(json.dumps({"type": "pause"}))
+            # Drain any in-flight messages for ~1.2s
+            try:
+                while True:
+                    await asyncio.wait_for(ws.recv(), timeout=1.2)
+            except asyncio.TimeoutError:
+                pass
+            # Now no log should arrive within ~1.5s
+            paused_silent = False
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=1.5)
+            except asyncio.TimeoutError:
+                paused_silent = True
+            assert paused_silent, "logs still streaming after pause"
+
+            # Resume → logs again
+            await ws.send(json.dumps({"type": "resume"}))
+            resumed = False
+            deadline = time.time() + 4
+            while time.time() < deadline and not resumed:
+                raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                if json.loads(raw).get("kind") == "log":
+                    resumed = True
+            assert resumed, "no logs after resume"
+
+    @pytest.mark.asyncio
+    async def test_continuous_log_format(self):
+        async with websockets.connect(WS_URL, open_timeout=10) as ws:
+            await asyncio.wait_for(ws.recv(), timeout=5)  # hello
+            logs = []
+            deadline = time.time() + 4
+            while time.time() < deadline and len(logs) < 3:
+                raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                d = json.loads(raw)
+                if d.get("kind") == "log":
+                    logs.append(d.get("line", ""))
+            assert len(logs) >= 3
+            for line in logs:
+                # format: [HH:MM:SS.mmm] [TAG] ...
+                assert line.startswith("[") and "] [" in line
+
+
+# ----- Rate limiting -----
+class TestRateLimit:
+    def test_run_rate_limit_429(self):
+        payload = {"causality_entropy": 0.5, "twist_45": 0.5, "pec_gamma": 0.5}
+        last_status = None
+        hit_429 = False
+        for _ in range(33):
+            r = requests.post(f"{API}/inversion/run", json=payload, timeout=10)
+            last_status = r.status_code
+            if r.status_code == 429:
+                hit_429 = True
+                break
+        assert hit_429, f"expected 429 within 33 calls, last={last_status}"
+
+    def test_history_rate_limit_429(self):
+        hit_429 = False
+        for _ in range(65):
+            r = requests.get(f"{API}/inversion/history?limit=1", timeout=10)
+            if r.status_code == 429:
+                hit_429 = True
+                break
+        assert hit_429, "expected 429 on history within 65 calls"
 
 
 class TestInversionRun:
